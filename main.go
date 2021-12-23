@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	abcitypes "github.com/tendermint/tendermint/abci/types"
@@ -15,15 +16,16 @@ import (
 	"github.com/spf13/viper"
 	abci "github.com/tendermint/tendermint/abci/types"
 	cfg "github.com/tendermint/tendermint/config"
-	"github.com/tendermint/tendermint/p2p"
 	tmflags "github.com/tendermint/tendermint/libs/cli/flags"
 	"github.com/tendermint/tendermint/libs/log"
 	nm "github.com/tendermint/tendermint/node"
+	"github.com/tendermint/tendermint/p2p"
 	"github.com/tendermint/tendermint/privval"
 	//"github.com/tendermint/tendermint/proxy"
 )
 
 var configFile string
+var logger log.Logger
 
 func init() {
 	flag.StringVar(&configFile, "config", "/Users/didi/.tendermint/config/config.toml", "Path to config.toml")
@@ -77,9 +79,9 @@ func newTendermint(app abci.Application, configFile string) (*nm.Node, error) {
 	}
 
 	// create logger
-	logger := log.NewTMLogger(log.NewSyncWriter(os.Stdout))
+	logger = log.NewTMLogger(log.NewSyncWriter(os.Stdout))
 	var err error
-	logger, err = tmflags.ParseLogLevel(config.LogLevel, logger, "info")
+	logger, err = tmflags.ParseLogLevel(config.LogLevel, logger, "debug")
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse log level: %w", err)
 	}
@@ -127,53 +129,143 @@ func NewKVStoreApplication(db *badger.DB) *KVStoreApplication {
 }
 
 func (KVStoreApplication) Info(req abcitypes.RequestInfo) abcitypes.ResponseInfo {
+	fmt.Println("Info")
 	return abcitypes.ResponseInfo{}
 }
 
-func (KVStoreApplication) DeliverTx(req abcitypes.RequestDeliverTx) abcitypes.ResponseDeliverTx {
-	return abcitypes.ResponseDeliverTx{Code: 0}
+func (app *KVStoreApplication) DeliverTx(req abcitypes.RequestDeliverTx) abcitypes.ResponseDeliverTx {
+	fmt.Printf("DeliverTx########### %s", req.String())
+	code := app.isValid(req.Tx)
+	if code != 0 {
+		return abcitypes.ResponseDeliverTx{Code: code}
+	}
+
+	parts := bytes.Split(req.Tx, []byte("="))
+	key, value := parts[0], parts[1]
+
+	err := app.currentBatch.Set(key, value)
+	if err != nil {
+		panic(err)
+	}
+	// curl -v 'http://localhost:26657/tx_search?query="tx.height=467"'
+	events := []abci.Event{
+		{
+			Type: "string",
+			Attributes: []abci.EventAttribute{
+				{Key: []byte(key), Value: []byte(value), Index: true},
+			},
+		},
+	}
+	return abcitypes.ResponseDeliverTx{Code: 0, Events: events}
 }
 
-func (KVStoreApplication) CheckTx(req abcitypes.RequestCheckTx) abcitypes.ResponseCheckTx {
-	return abcitypes.ResponseCheckTx{Code: 0}
+func (app *KVStoreApplication) CheckTx(req abcitypes.RequestCheckTx) abcitypes.ResponseCheckTx {
+	fmt.Printf("CheckTx !!!!!!!!!!!!!!!! %s", req.String())
+	code := app.isValid(req.Tx)
+	return abcitypes.ResponseCheckTx{Code: code, GasWanted: 1}
 }
 
-func (KVStoreApplication) Commit() abcitypes.ResponseCommit {
-	return abcitypes.ResponseCommit{}
+func (app *KVStoreApplication) Commit() abcitypes.ResponseCommit {
+	fmt.Println("Commit*********")
+	app.currentBatch.Commit()
+	return abcitypes.ResponseCommit{Data: []byte{}}
 }
 
-func (KVStoreApplication) Query(req abcitypes.RequestQuery) abcitypes.ResponseQuery {
+func (app *KVStoreApplication) Query(reqQuery abcitypes.RequestQuery) (resQuery abcitypes.ResponseQuery) {
+	fmt.Println("Query")
+	resQuery.Key = reqQuery.Data
+	err := app.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(reqQuery.Data)
+		if err != nil && err != badger.ErrKeyNotFound {
+			return err
+		}
+		if err == badger.ErrKeyNotFound {
+			resQuery.Log = "does not exist"
+		} else {
+			return item.Value(func(val []byte) error {
+				resQuery.Log = "exists"
+				resQuery.Value = val
+				return nil
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
 	return abcitypes.ResponseQuery{Code: 0}
 }
 
 func (KVStoreApplication) InitChain(req abcitypes.RequestInitChain) abcitypes.ResponseInitChain {
+	fmt.Println("InitChain")
+	fmt.Printf("iiiiiint")
 	return abcitypes.ResponseInitChain{}
 }
 
-func (KVStoreApplication) BeginBlock(req abcitypes.RequestBeginBlock) abcitypes.ResponseBeginBlock {
+func (app *KVStoreApplication) BeginBlock(req abcitypes.RequestBeginBlock) abcitypes.ResponseBeginBlock {
+	fmt.Println("BeginBlock")
+	app.currentBatch = app.db.NewTransaction(true)
 	return abcitypes.ResponseBeginBlock{}
 }
 
-func (KVStoreApplication) EndBlock(req abcitypes.RequestEndBlock) abcitypes.ResponseEndBlock {
+func (app *KVStoreApplication) EndBlock(req abcitypes.RequestEndBlock) abcitypes.ResponseEndBlock {
+	fmt.Println("EndBlock")
 	return abcitypes.ResponseEndBlock{}
 }
 
 func (KVStoreApplication) ListSnapshots(abcitypes.RequestListSnapshots) abcitypes.ResponseListSnapshots {
+	fmt.Println("ListSnapshots")
 	return abcitypes.ResponseListSnapshots{}
 }
 
 func (KVStoreApplication) OfferSnapshot(abcitypes.RequestOfferSnapshot) abcitypes.ResponseOfferSnapshot {
+	fmt.Println("OfferSnapshot")
 	return abcitypes.ResponseOfferSnapshot{}
 }
 
 func (KVStoreApplication) LoadSnapshotChunk(abcitypes.RequestLoadSnapshotChunk) abcitypes.ResponseLoadSnapshotChunk {
+	fmt.Println("LoadSnapshotChunk")
 	return abcitypes.ResponseLoadSnapshotChunk{}
 }
 
 func (KVStoreApplication) ApplySnapshotChunk(abcitypes.RequestApplySnapshotChunk) abcitypes.ResponseApplySnapshotChunk {
+	fmt.Println("ApplySnapshotChunk")
 	return abcitypes.ResponseApplySnapshotChunk{}
 }
 
 func (KVStoreApplication) SetOption(abci.RequestSetOption) abcitypes.ResponseSetOption {
+	fmt.Println("SetOption")
 	return abcitypes.ResponseSetOption{}
 } // Set application option
+
+func (app *KVStoreApplication) isValid(tx []byte) (code uint32) {
+	// check format
+	parts := bytes.Split(tx, []byte("="))
+	if len(parts) != 2 {
+		return 1
+	}
+
+	key, value := parts[0], parts[1]
+
+	// check if the same key=value already exists
+	err := app.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(key)
+		if err != nil && err != badger.ErrKeyNotFound {
+			return err
+		}
+		if err == nil {
+			return item.Value(func(val []byte) error {
+				if bytes.Equal(val, value) {
+					code = 2
+				}
+				return nil
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	return code
+}
